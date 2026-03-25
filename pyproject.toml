@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "labelimage"
+version = "1.0.0"
+description = "Cross-platform image annotation tool inspired by RectLabel Pro"
+readme = "README.md"
+license = {text = "LGPL-3.0"}
+requires-python = ">=3.10"
+authors = [
+    {name = "LabelImage Contributors"},
+]
+keywords = ["annotation", "image", "labeling", "yolo", "object-detection", "segmentation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "PySide6>=6.6.0",
+]
+
+[project.optional-dependencies]
+yolo = ["ultralytics>=8.0.0"]
+cv = ["opencv-python>=4.8.0"]
+all = [
+    "ultralytics>=8.0.0",
+    "opencv-python>=4.8.0",
+]
+
+[project.scripts]
+labelimage = "main:main"
+
+[project.gui-scripts]
+labelimage-gui = "main:main"
+
+[tool.setuptools.packages.find]
+include = ["src*"]

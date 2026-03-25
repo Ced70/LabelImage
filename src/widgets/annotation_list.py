@@ -44,8 +44,7 @@ class AnnotationListWidget(QWidget):
                 label = self._label_manager.get(ann.label_id)
                 name = label.name if label else f"class_{ann.label_id}"
                 color = label.color if label else "#888888"
-                bbox = ann.bbox
-                text = f"{name} [{bbox.x:.0f},{bbox.y:.0f} {bbox.width:.0f}x{bbox.height:.0f}]"
+                text = f"{name} {ann.display_info()}"
                 item = QListWidgetItem(text)
                 pixmap = QPixmap(16, 16)
                 pixmap.fill(QColor(color))

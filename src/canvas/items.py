@@ -130,6 +130,10 @@ class BBoxItem(QGraphicsRectItem):
             event.accept()
             return
         super().mouseMoveEvent(event)
+        # Show snap guides while dragging
+        scene = self.scene()
+        if scene and hasattr(scene, "show_snap_guides"):
+            scene.show_snap_guides(self)
 
     def mouseReleaseEvent(self, event: QGraphicsSceneMouseEvent):
         old_rect = self._rect_before_edit

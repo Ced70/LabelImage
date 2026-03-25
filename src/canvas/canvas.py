@@ -1,45 +1,162 @@
 from __future__ import annotations
 
+from enum import Enum
+
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF
-from PySide6.QtGui import QPixmap, QColor, QPainter, QWheelEvent, QMouseEvent, QKeyEvent
+from PySide6.QtGui import (
+    QPixmap, QImage, QColor, QPainter, QWheelEvent, QMouseEvent, QKeyEvent,
+    QPen, QPolygonF,
+)
 from PySide6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsItem,
+    QGraphicsLineItem,
 )
 
-from src.canvas.items import BBoxItem
-from src.models.annotation import Annotation, BoundingBox
+from src.canvas.items import BBoxItem, PolygonItem
+from src.utils.snap import find_snap_lines
+
+
+class DrawMode(Enum):
+    BBOX = "bbox"
+    POLYGON = "polygon"
 
 
 class AnnotationScene(QGraphicsScene):
     """Scene that holds the image and all annotation items."""
 
-    annotation_added = Signal(object)        # Annotation
-    annotation_changed = Signal(object, object)  # BBoxItem, old_rect (dict or None)
-    annotation_selected = Signal(str)        # uid or ""
+    annotation_added = Signal(object)            # Annotation
+    annotation_changed = Signal(object, object)  # item, old_data (dict or None)
+    annotation_selected = Signal(str)            # uid or ""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._pixmap_item: QGraphicsPixmapItem | None = None
+        self._original_pixmap: QPixmap | None = None
+        self._brightness: int = 0   # -100 to +100
+        self._contrast: int = 0     # -100 to +100
+        self._snap_lines: list = []
+        self._grid_lines: list = []
+        self._grid_visible: bool = False
+        self._grid_size: int = 50
 
     def set_image(self, pixmap: QPixmap) -> None:
         self.clear()
-        self._pixmap_item = self.addPixmap(pixmap)
+        self._original_pixmap = pixmap
+        self._pixmap_item = self.addPixmap(self._apply_adjustments(pixmap))
         self._pixmap_item.setZValue(-1)
         self.setSceneRect(QRectF(pixmap.rect()))
 
+    def set_brightness_contrast(self, brightness: int, contrast: int) -> None:
+        self._brightness = brightness
+        self._contrast = contrast
+        if self._original_pixmap and self._pixmap_item:
+            self._pixmap_item.setPixmap(self._apply_adjustments(self._original_pixmap))
+
+    def _apply_adjustments(self, pixmap: QPixmap) -> QPixmap:
+        if self._brightness == 0 and self._contrast == 0:
+            return pixmap
+        image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        # Apply brightness and contrast using pixel manipulation via QPainter
+        # Use a simpler approach: overlay with semi-transparent white/black for brightness
+        result = QPixmap.fromImage(image)
+        painter = QPainter(result)
+        if self._brightness > 0:
+            painter.fillRect(result.rect(), QColor(255, 255, 255, int(self._brightness * 2.55)))
+        elif self._brightness < 0:
+            painter.fillRect(result.rect(), QColor(0, 0, 0, int(-self._brightness * 2.55)))
+        if self._contrast != 0:
+            # Contrast: overlay with gray for decrease, no simple overlay for increase
+            if self._contrast < 0:
+                painter.fillRect(result.rect(), QColor(128, 128, 128, int(-self._contrast * 2.55)))
+        painter.end()
+        return result
+
     def bbox_changed(self, item: BBoxItem, old_rect: dict | None = None) -> None:
+        self.clear_snap_guides()
         self.annotation_changed.emit(item, old_rect)
+
+    def polygon_changed(self, item: PolygonItem, old_points: list | None = None) -> None:
+        self.clear_snap_guides()
+        self.annotation_changed.emit(item, old_points)
+
+    # --- Snap guides ---
+
+    def show_snap_guides(self, moving_item: BBoxItem) -> None:
+        """Show snap alignment guides while moving a bbox."""
+        self.clear_snap_guides()
+        moving_rect = moving_item.get_rect_in_scene()
+        other_rects = []
+        for item in self.items():
+            if isinstance(item, BBoxItem) and item is not moving_item:
+                other_rects.append(item.get_rect_in_scene())
+
+        v_lines, h_lines, _, _ = find_snap_lines(moving_rect, other_rects)
+        sr = self.sceneRect()
+        pen = QPen(QColor(0, 200, 255, 150), 1, Qt.PenStyle.DashDotLine)
+        pen.setCosmetic(True)
+
+        for x in v_lines:
+            line = self.addLine(x, sr.top(), x, sr.bottom(), pen)
+            line.setZValue(999)
+            self._snap_lines.append(line)
+        for y in h_lines:
+            line = self.addLine(sr.left(), y, sr.right(), y, pen)
+            line.setZValue(999)
+            self._snap_lines.append(line)
+
+    def clear_snap_guides(self) -> None:
+        for line in self._snap_lines:
+            self.removeItem(line)
+        self._snap_lines.clear()
+
+    # --- Grid overlay ---
+
+    def set_grid(self, visible: bool, size: int = 50) -> None:
+        self._grid_visible = visible
+        self._grid_size = size
+        self._draw_grid()
+
+    def _draw_grid(self) -> None:
+        for line in self._grid_lines:
+            self.removeItem(line)
+        self._grid_lines = []
+
+        if not self._grid_visible:
+            return
+
+        sr = self.sceneRect()
+        pen = QPen(QColor(255, 255, 255, 30), 1)
+        pen.setCosmetic(True)
+
+        x = sr.left()
+        while x <= sr.right():
+            line = self.addLine(x, sr.top(), x, sr.bottom(), pen)
+            line.setZValue(998)
+            self._grid_lines.append(line)
+            x += self._grid_size
+
+        y = sr.top()
+        while y <= sr.bottom():
+            line = self.addLine(sr.left(), y, sr.right(), y, pen)
+            line.setZValue(998)
+            self._grid_lines.append(line)
+            y += self._grid_size
 
 
 class CanvasView(QGraphicsView):
-    """Main canvas view with zoom, pan, and bbox drawing."""
+    """Main canvas view with zoom, pan, bbox and polygon drawing."""
 
-    bbox_drawn = Signal(float, float, float, float)  # x, y, w, h in scene coords
-    delete_requested = Signal()  # user pressed Delete on canvas
+    bbox_drawn = Signal(float, float, float, float)  # x, y, w, h
+    polygon_drawn = Signal(object)  # list of (x, y) tuples
+    delete_requested = Signal()
+    mode_changed = Signal(str)  # "bbox" or "polygon"
+    cursor_moved = Signal(float, float)  # scene x, y
+    context_menu_requested = Signal(object, object)  # item (BBoxItem/PolygonItem), QPoint (global pos)
 
     def __init__(self, scene: AnnotationScene, parent=None):
         super().__init__(scene, parent)
         self._scene = scene
+        self._draw_mode = DrawMode.BBOX
         self._drawing = False
         self._draw_enabled = True
         self._draw_start: QPointF | None = None
@@ -47,6 +164,18 @@ class CanvasView(QGraphicsView):
         self._panning = False
         self._pan_start: QPointF | None = None
         self._zoom_factor = 1.15
+        self._zoom_min = 0.02
+        self._zoom_max = 80.0
+
+        # Crosshair
+        self._crosshair_enabled = True
+        self._crosshair_h: QGraphicsLineItem | None = None
+        self._crosshair_v: QGraphicsLineItem | None = None
+
+        # Polygon drawing state
+        self._poly_points: list[QPointF] = []
+        self._poly_lines: list[QGraphicsLineItem] = []
+        self._poly_preview_line: QGraphicsLineItem | None = None
 
         self.setRenderHints(
             QPainter.RenderHint.Antialiasing |
@@ -58,6 +187,42 @@ class CanvasView(QGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setBackgroundBrush(QColor(40, 40, 40))
+        self.setMouseTracking(True)
+
+    @property
+    def draw_mode(self) -> DrawMode:
+        return self._draw_mode
+
+    def set_crosshair(self, enabled: bool) -> None:
+        self._crosshair_enabled = enabled
+        if not enabled:
+            self._clear_crosshair()
+
+    def _clear_crosshair(self) -> None:
+        if self._crosshair_h:
+            self._scene.removeItem(self._crosshair_h)
+            self._crosshair_h = None
+        if self._crosshair_v:
+            self._scene.removeItem(self._crosshair_v)
+            self._crosshair_v = None
+
+    def _update_crosshair(self, scene_pos: QPointF) -> None:
+        if not self._crosshair_enabled:
+            return
+        sr = self._scene.sceneRect()
+        pen = QPen(QColor(255, 255, 0, 80), 1, Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+
+        self._clear_crosshair()
+        self._crosshair_h = self._scene.addLine(sr.left(), scene_pos.y(), sr.right(), scene_pos.y(), pen)
+        self._crosshair_v = self._scene.addLine(scene_pos.x(), sr.top(), scene_pos.x(), sr.bottom(), pen)
+        self._crosshair_h.setZValue(1000)
+        self._crosshair_v.setZValue(1000)
+
+    def set_draw_mode(self, mode: DrawMode) -> None:
+        self._cancel_polygon_drawing()
+        self._draw_mode = mode
+        self.mode_changed.emit(mode.value)
 
     def set_draw_enabled(self, enabled: bool) -> None:
         self._draw_enabled = enabled
@@ -65,11 +230,33 @@ class CanvasView(QGraphicsView):
     def fit_image(self) -> None:
         self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
+    def fit_to_rect(self, rect: QRectF, margin: float = 50) -> None:
+        """Zoom and center on a specific rect with margin."""
+        padded = rect.adjusted(-margin, -margin, margin, margin)
+        self.fitInView(padded, Qt.AspectRatioMode.KeepAspectRatio)
+
     def wheelEvent(self, event: QWheelEvent) -> None:
-        if event.angleDelta().y() > 0:
-            self.scale(self._zoom_factor, self._zoom_factor)
-        else:
-            self.scale(1 / self._zoom_factor, 1 / self._zoom_factor)
+        # Use angleDelta which works for both mouse wheel and trackpad scroll
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+
+        # Smooth factor proportional to scroll amount
+        # angleDelta is typically ±120 per mouse wheel notch,
+        # but trackpad sends smaller values for smooth scrolling
+        factor = 1.0 + (delta / 600.0)
+
+        # Clamp to sane range
+        factor = max(0.8, min(factor, 1.25))
+
+        # Apply zoom limits
+        current_zoom = self.transform().m11()
+        new_zoom = current_zoom * factor
+        if new_zoom < self._zoom_min or new_zoom > self._zoom_max:
+            return
+
+        self.scale(factor, factor)
+        event.accept()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         # Middle button: pan
@@ -80,16 +267,22 @@ class CanvasView(QGraphicsView):
             event.accept()
             return
 
-        # Left button: draw or select
+        # Left button
         if event.button() == Qt.MouseButton.LeftButton:
             scene_pos = self.mapToScene(event.position().toPoint())
-            # Check if clicking on existing item
-            item = self._scene.itemAt(scene_pos, self.transform())
-            if item and isinstance(item, BBoxItem):
+
+            # Check if clicking on existing item (not during polygon drawing)
+            if not self._poly_points:
+                item = self._scene.itemAt(scene_pos, self.transform())
+                if item and isinstance(item, (BBoxItem, PolygonItem)):
+                    super().mousePressEvent(event)
+                    return
+
+            if not self._draw_enabled:
                 super().mousePressEvent(event)
                 return
 
-            if self._draw_enabled:
+            if self._draw_mode == DrawMode.BBOX:
                 self._drawing = True
                 self._draw_start = scene_pos
                 self._temp_rect = BBoxItem(
@@ -99,6 +292,26 @@ class CanvasView(QGraphicsView):
                 self._temp_rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
                 self._temp_rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
                 self._scene.addItem(self._temp_rect)
+                event.accept()
+                return
+
+            elif self._draw_mode == DrawMode.POLYGON:
+                self._add_polygon_point(scene_pos)
+                event.accept()
+                return
+
+        # Right button: finish polygon or context menu
+        if event.button() == Qt.MouseButton.RightButton:
+            if self._poly_points and len(self._poly_points) >= 3:
+                self._finish_polygon()
+                event.accept()
+                return
+            # Context menu on annotation
+            scene_pos = self.mapToScene(event.position().toPoint())
+            item = self._scene.itemAt(scene_pos, self.transform())
+            if item and isinstance(item, (BBoxItem, PolygonItem)):
+                item.setSelected(True)
+                self.context_menu_requested.emit(item, event.globalPosition().toPoint())
                 event.accept()
                 return
 
@@ -127,6 +340,25 @@ class CanvasView(QGraphicsView):
             event.accept()
             return
 
+        # Crosshair + cursor position
+        scene_pos = self.mapToScene(event.position().toPoint())
+        self._update_crosshair(scene_pos)
+        sr = self._scene.sceneRect()
+        if sr.contains(scene_pos):
+            self.cursor_moved.emit(scene_pos.x(), scene_pos.y())
+
+        # Preview line for polygon drawing
+        if self._poly_points:
+            scene_pos = self.mapToScene(event.position().toPoint())
+            if self._poly_preview_line:
+                self._scene.removeItem(self._poly_preview_line)
+            pen = QPen(QColor(200, 200, 200), 1, Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            last = self._poly_points[-1]
+            self._poly_preview_line = self._scene.addLine(
+                last.x(), last.y(), scene_pos.x(), scene_pos.y(), pen
+            )
+
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
@@ -143,7 +375,6 @@ class CanvasView(QGraphicsView):
                 rect = self._temp_rect.rect()
                 self._scene.removeItem(self._temp_rect)
                 self._temp_rect = None
-                # Only emit if rect is big enough (avoid accidental clicks)
                 if rect.width() > 5 and rect.height() > 5:
                     self.bbox_drawn.emit(rect.x(), rect.y(), rect.width(), rect.height())
             self._draw_start = None
@@ -152,9 +383,50 @@ class CanvasView(QGraphicsView):
 
         super().mouseReleaseEvent(event)
 
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        # Double-click finishes polygon (alternative to right-click)
+        if event.button() == Qt.MouseButton.LeftButton and self._poly_points:
+            if len(self._poly_points) >= 3:
+                self._finish_polygon()
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             self.delete_requested.emit()
             event.accept()
             return
+        if event.key() == Qt.Key.Key_Escape:
+            self._cancel_polygon_drawing()
+            event.accept()
+            return
         super().keyPressEvent(event)
+
+    # --- Polygon drawing helpers ---
+
+    def _add_polygon_point(self, pos: QPointF) -> None:
+        if self._poly_points:
+            last = self._poly_points[-1]
+            pen = QPen(QColor(0, 255, 0), 2)
+            pen.setCosmetic(True)
+            line = self._scene.addLine(last.x(), last.y(), pos.x(), pos.y(), pen)
+            self._poly_lines.append(line)
+        self._poly_points.append(pos)
+
+    def _finish_polygon(self) -> None:
+        points = [(p.x(), p.y()) for p in self._poly_points]
+        self._cleanup_polygon_temp()
+        self.polygon_drawn.emit(points)
+
+    def _cancel_polygon_drawing(self) -> None:
+        self._cleanup_polygon_temp()
+
+    def _cleanup_polygon_temp(self) -> None:
+        for line in self._poly_lines:
+            self._scene.removeItem(line)
+        self._poly_lines.clear()
+        if self._poly_preview_line:
+            self._scene.removeItem(self._poly_preview_line)
+            self._poly_preview_line = None
+        self._poly_points.clear()

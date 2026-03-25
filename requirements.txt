@@ -1,1 +1,3 @@
 PySide6>=6.6.0
+ultralytics>=8.0.0      # optional, for YOLO auto-annotation
+opencv-python>=4.8.0    # optional, for template matching prediction

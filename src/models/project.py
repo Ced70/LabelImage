@@ -16,13 +16,15 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
 class Project:
     """Manages the current working directory of images."""
     image_dir: str = ""
+    annotations_dir: str = ""  # empty = same as image_dir
     image_files: list[str] = field(default_factory=list)
     current_index: int = -1
     label_manager: LabelManager = field(default_factory=LabelManager)
     _annotations_cache: dict[str, ImageAnnotations] = field(default_factory=dict)
 
-    def open_directory(self, directory: str) -> None:
+    def open_directory(self, directory: str, annotations_dir: str = "") -> None:
         self.image_dir = directory
+        self.annotations_dir = annotations_dir or directory
         self.image_files = sorted(
             f for f in os.listdir(directory)
             if Path(f).suffix.lower() in IMAGE_EXTENSIONS
@@ -30,11 +32,16 @@ class Project:
         self._annotations_cache.clear()
         self.current_index = 0 if self.image_files else -1
 
-        # Load classes.txt if it exists
-        classes_path = os.path.join(directory, "classes.txt")
-        if os.path.isfile(classes_path):
-            with open(classes_path, "r", encoding="utf-8") as f:
-                self.label_manager = LabelManager.from_classes_txt(f.read())
+        # Load classes.txt from annotations dir first, then image dir
+        for d in (self.annotations_dir, directory):
+            classes_path = os.path.join(d, "classes.txt")
+            if os.path.isfile(classes_path):
+                with open(classes_path, "r", encoding="utf-8") as f:
+                    self.label_manager = LabelManager.from_classes_txt(f.read())
+                break
+
+    def get_annotations_dir(self) -> str:
+        return self.annotations_dir or self.image_dir
 
     def current_image_path(self) -> str | None:
         if 0 <= self.current_index < len(self.image_files):
@@ -85,6 +92,8 @@ class Project:
 
     def save_classes_txt(self) -> None:
         if self.image_dir and self.label_manager.labels:
-            path = os.path.join(self.image_dir, "classes.txt")
+            ann_dir = self.get_annotations_dir()
+            os.makedirs(ann_dir, exist_ok=True)
+            path = os.path.join(ann_dir, "classes.txt")
             with open(path, "w", encoding="utf-8") as f:
                 f.write(self.label_manager.to_classes_txt())
